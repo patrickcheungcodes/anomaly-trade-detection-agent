@@ -3,3 +3,4 @@ numpy
 python-dotenv
 openai                #We use this library for Deepseek (Compatible)
 streamlit
+scikit-learn
