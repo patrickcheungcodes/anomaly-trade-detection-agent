@@ -1,90 +1,112 @@
+import streamlit as st
 import pandas as pd
-import numpy as np
-import logging
 import os
 from dotenv import load_dotenv
 from sklearn.ensemble import IsolationForest
+from openai import OpenAI
 
-# 1. Production-ready logging
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# --- Page Config ---
+st.set_page_config(page_title="Agentic Trade Anomaly Detector", layout="wide")
+
+# --- Initialize Environment & DeepSeek ---
+load_dotenv()
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+
+if not DEEPSEEK_API_KEY:
+    st.error("DEEPSEEK_API_KEY not found in .env file. Please add it.")
+
+client = OpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com"
 )
-logger = logging.getLogger("TradeAnomalyDetector")
 
+# --- Core Logic ---
 class AnomalyDetector:
-    def __init__(self, data_path: str, output_path: str):
-        self.data_path = data_path
-        self.output_path = output_path
-        
-        # 2. Use dotenv for configurations
-        load_dotenv()
-        # Default to 5% contamination if not set in .env
-        self.contamination = float(os.getenv('ANOMALY_CONTAMINATION', 0.05)) 
-        
-        # Initialize the ML Model
-        self.model = IsolationForest(
-            contamination=self.contamination, 
-            random_state=42
-        )
+    def __init__(self, contamination: float = 0.05):
+        self.model = IsolationForest(contamination=contamination, random_state=42)
 
-    def load_and_clean_data(self) -> pd.DataFrame:
-        """Loads data with basic error handling."""
-        try:
-            df = pd.read_csv(self.data_path)
-            logger.info(f"Successfully loaded {len(df)} trades.")
-            
-            # Feature Engineering
-            df['trade_date'] = pd.to_datetime(df['trade_date'])
-            df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
-            
-            # Drop rows where critical financial data couldn't be parsed
-            df = df.dropna(subset=['amount', 'position_value'])
-            
-            return df
-        except FileNotFoundError:
-            logger.error(f"Data file not found at {self.data_path}. Please check the path.")
-            raise
-        except Exception as e:
-            logger.error(f"An error occurred during data loading: {str(e)}")
-            raise
-
-    def detect_anomalies(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Applies Isolation Forest for multivariate anomaly detection."""
-        logger.info("Running Isolation Forest algorithm...")
-        
-        # Select features for the model
+    def detect(self, df: pd.DataFrame) -> pd.DataFrame:
         features = ['amount', 'position_value']
-        X = df[features]
-        
-        # Fit model and predict (-1 for anomalies, 1 for normal)
+        X = df[features].fillna(0)
         df['anomaly_score'] = self.model.fit_predict(X)
-        
-        # Map back to boolean for easier querying (True if anomalous)
         df['is_anomaly'] = df['anomaly_score'] == -1
-        
-        anomalies_count = df['is_anomaly'].sum()
-        logger.info(f"Detected {anomalies_count} potential anomalies.")
-        
         return df
 
-    def save_results(self, df: pd.DataFrame):
-        """Saves the processed dataframe."""
-        df.to_csv(self.output_path, index=False)
-        logger.info(f"Results saved to {self.output_path}")
+class RiskAgent:
+    def generate_report(self, trade_data: pd.Series) -> str:
+        prompt = f"""
+        You are a Senior Quantitative Risk Officer at a Hedge Fund in Hong Kong.
+        Write a short (max 3 sentences), professional risk narrative for this flagged anomalous trade.
 
-    def run_pipeline(self):
-        """Executes the end-to-end detection pipeline."""
-        logger.info("=== Starting Anomaly Detection Pipeline ===")
-        df = self.load_and_clean_data()
-        df_processed = self.detect_anomalies(df)
-        self.save_results(df_processed)
-        logger.info("=== Pipeline Completed ===")
+        Trade Details:
+        - Asset: {trade_data.get('asset', 'Unknown')}
+        - Amount Traded: ${trade_data.get('amount', 0):,.2f}
+        - Position Value: ${trade_data.get('position_value', 0):,.2f}
+        """
+
+        try:
+            response = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=300
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            return f"Error generating report: {str(e)}"
+
+# --- Streamlit UI ---
+def main():
+    st.title("📈 Hedge Fund Agentic Anomaly Detection")
+    st.markdown("Isolation Forest + DeepSeek AI for explainable risk insights.")
+
+    with st.sidebar:
+        st.header("Controls")
+        uploaded_file = st.file_uploader("Upload Trade Data (CSV)", type="csv")
+        contamination = st.slider("Anomaly Sensitivity", 0.01, 0.10, 0.05)
+
+    if uploaded_file is not None:
+        df = pd.read_csv(uploaded_file)
+
+        # Basic cleaning
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+        df['position_value'] = pd.to_numeric(df['position_value'], errors='coerce')
+        df = df.dropna(subset=['amount', 'position_value'])
+
+        # Run Detection
+        with st.spinner("Running Anomaly Detection..."):
+            detector = AnomalyDetector(contamination=contamination)
+            df = detector.detect(df)
+
+        anomalies = df[df['is_anomaly']]
+
+        # Metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Trades", len(df))
+        col2.metric("Anomalies Detected", len(anomalies))
+        col3.metric("Sensitivity", f"{contamination*100:.1f}%")
+
+        # Scatter Plot
+        st.subheader("Amount vs Position Value")
+        st.scatter_chart(df, x='amount', y='position_value', color='is_anomaly')
+
+        # Anomalies Table + AI Reports
+        st.subheader("🚨 Detected Anomalies & AI Risk Reports")
+        if not anomalies.empty:
+            st.dataframe(anomalies[['trade_id', 'asset', 'amount', 'position_value']], use_container_width=True)
+
+            selected_trade_id = st.selectbox("Select Trade ID to investigate:", anomalies['trade_id'])
+            if st.button("Generate Risk Report"):
+                trade_row = anomalies[anomalies['trade_id'] == selected_trade_id].iloc[0]
+                agent = RiskAgent()
+                with st.spinner("DeepSeek Agent is analyzing..."):
+                    report = agent.generate_report(trade_row)
+                    st.info(report)
+        else:
+            st.success("No anomalies detected at current sensitivity.")
+
+    else:
+        st.info("👈 Upload your trade data CSV to begin analysis.")
 
 if __name__ == "__main__":
-    # Execution block
-    detector = AnomalyDetector(
-        data_path='data/sample_trades.csv', 
-        output_path='data/processed_trades.csv'
-    )
-    detector.run_pipeline()
+    main()
