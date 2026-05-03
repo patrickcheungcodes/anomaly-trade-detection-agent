@@ -1,3 +1,20 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Streamlit
+.streamlit/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
